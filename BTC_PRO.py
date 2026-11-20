@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# BTC PRO MULTI V21 - Multi-Coin + Auto Timer per User
+# ربات تحلیل ارز - نسخه ساده و دقیق برای پدر
 import os
 import sys
 import json
@@ -12,33 +12,30 @@ BASE = "https://data-api.binance.vision"
 TOKEN = os.getenv("BOT_TOKEN", "")
 CHAT = os.getenv("ALLOWED_CHAT_ID", "") or os.getenv("CHAT_ID", "")
 TIMEOUT = 20
-AUTO_INTERVAL = 900  # 15 دقیقه
-
-DEFAULT_TIMEFRAME = "15m"
 
 COINS = {
     "🟠 بیت کوین": "BTCUSDT",
     "🔷 اتریوم": "ETHUSDT",
     "🟣 سولانا": "SOLUSDT",
     "🔵 ریپل": "XRPUSDT",
-    "🟡 بایننس کوین": "BNBUSDT",
+    "🟡 بایننس": "BNBUSDT",
     "⚪ کاردانو": "ADAUSDT",
-    "🟢 دوج کوین": "DOGEUSDT",
+    "🟢 دوج": "DOGEUSDT",
 }
 
 TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
+HIGHER_TF = {"5m": "15m", "15m": "1h", "1h": "4h", "4h": "1d", "1d": "1d"}
 
-# chat_id -> {"coin": "🟠 بیت کوین", "tf": "15m"}
 subscriptions = {}
 lock = threading.Lock()
 
 
-# ─── API ───
+# ═══════════════ دریافت داده ═══════════════
 def api(path, params=None):
     url = BASE + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "BTC-PRO-V21"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Bot"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.loads(r.read().decode())
 
@@ -46,12 +43,10 @@ def api(path, params=None):
 def candles(symbol, interval, limit=300):
     rows = api("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
     now = int(time.time() * 1000)
-    rows = [x for x in rows if int(x[6]) < now]
+    rows = [x for x in rows if int(x[6]) < now]  # فقط کندل بسته‌شده
     if len(rows) < 220:
-        raise RuntimeError("داده کافی نیست: " + interval)
+        raise RuntimeError("داده کافی نیست")
     return {
-        "time": [int(x[0]) for x in rows],
-        "open": [float(x[1]) for x in rows],
         "high": [float(x[2]) for x in rows],
         "low": [float(x[3]) for x in rows],
         "close": [float(x[4]) for x in rows],
@@ -59,17 +54,17 @@ def candles(symbol, interval, limit=300):
     }
 
 
-# ─── اندیکاتورها ───
+# ═══════════════ اندیکاتورها ═══════════════
 def ema(v, p):
     out = [None] * len(v)
     if len(v) < p:
         return out
-    value = sum(v[:p]) / p
-    out[p - 1] = value
-    alpha = 2 / (p + 1)
+    val = sum(v[:p]) / p
+    out[p - 1] = val
+    a = 2 / (p + 1)
     for i in range(p, len(v)):
-        value = v[i] * alpha + value * (1 - alpha)
-        out[i] = value
+        val = v[i] * a + val * (1 - a)
+        out[i] = val
     return out
 
 
@@ -77,11 +72,10 @@ def rsi(v, p=14):
     out = [None] * len(v)
     if len(v) <= p:
         return out
-    changes = [v[i] - v[i - 1] for i in range(1, len(v))]
-    gains = [max(x, 0) for x in changes]
-    losses = [max(-x, 0) for x in changes]
-    ag = sum(gains[:p]) / p
-    al = sum(losses[:p]) / p
+    ch = [v[i] - v[i - 1] for i in range(1, len(v))]
+    g = [max(x, 0) for x in ch]
+    l = [max(-x, 0) for x in ch]
+    ag, al = sum(g[:p]) / p, sum(l[:p]) / p
 
     def calc(g, l):
         if l == 0:
@@ -90,8 +84,8 @@ def rsi(v, p=14):
 
     out[p] = calc(ag, al)
     for i in range(p + 1, len(v)):
-        ag = (ag * (p - 1) + gains[i - 1]) / p
-        al = (al * (p - 1) + losses[i - 1]) / p
+        ag = (ag * (p - 1) + g[i - 1]) / p
+        al = (al * (p - 1) + l[i - 1]) / p
         out[i] = calc(ag, al)
     return out
 
@@ -103,16 +97,13 @@ def macd(v):
         if f[i] is not None and s[i] is not None:
             line[i] = f[i] - s[i]
     start = next((i for i, x in enumerate(line) if x is not None), len(line))
-    valid = line[start:]
-    sig = ema(valid, 9) if valid else []
-    signal = [None] * len(v)
+    sig = ema(line[start:], 9) if line[start:] else []
     hist = [None] * len(v)
     for j, x in enumerate(sig):
         i = start + j
         if x is not None and line[i] is not None:
-            signal[i] = x
             hist[i] = line[i] - x
-    return line, signal, hist
+    return hist
 
 
 def dmi(data, p=14):
@@ -122,43 +113,41 @@ def dmi(data, p=14):
     plus = [0.0] * n
     minus = [0.0] * n
     for i in range(1, n):
-        up = h[i] - h[i - 1]
-        down = l[i - 1] - l[i]
-        plus[i] = up if up > down and up > 0 else 0
-        minus[i] = down if down > up and down > 0 else 0
+        up, dn = h[i] - h[i - 1], l[i - 1] - l[i]
+        plus[i] = up if up > dn and up > 0 else 0
+        minus[i] = dn if dn > up and dn > 0 else 0
         tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
-    st = sum(tr[1:p + 1])
-    sp = sum(plus[1:p + 1])
-    sm = sum(minus[1:p + 1])
+    st, sp, sm = sum(tr[1:p + 1]), sum(plus[1:p + 1]), sum(minus[1:p + 1])
     dx = []
-    last_pdi = last_mdi = 0
+    pdi = mdi = 0
     for i in range(p + 1, n):
         st = st - st / p + tr[i]
         sp = sp - sp / p + plus[i]
         sm = sm - sm / p + minus[i]
         if st == 0:
             continue
-        last_pdi = 100 * sp / st
-        last_mdi = 100 * sm / st
-        total = last_pdi + last_mdi
-        dx.append(100 * abs(last_pdi - last_mdi) / total if total else 0)
+        pdi, mdi = 100 * sp / st, 100 * sm / st
+        t = pdi + mdi
+        dx.append(100 * abs(pdi - mdi) / t if t else 0)
     if len(dx) < p:
         return 0, 0, 0
     adx = sum(dx[:p]) / p
     for x in dx[p:]:
         adx = (adx * (p - 1) + x) / p
-    return last_pdi, last_mdi, adx
+    return pdi, mdi, adx
 
 
+# ═══════════════ تحلیل اصلی ═══════════════
 def analyze(data):
     c, h, l, v = data["close"], data["high"], data["low"], data["volume"]
     e20, e50, e200 = ema(c, 20), ema(c, 50), ema(c, 200)
     rr = rsi(c)
-    _, _, mh = macd(c)
-    pdi, mdi, adx_value = dmi(data)
+    hist = macd(c)
+    pdi, mdi, adx = dmi(data)
     i = -1
     price = c[-1]
 
+    # امتیازدهی
     bull = bear = 0
     if price > e20[i]: bull += 2
     else: bear += 2
@@ -168,71 +157,80 @@ def analyze(data):
     else: bear += 2
     if rr[i] > 55: bull += 2
     elif rr[i] < 45: bear += 2
-    if mh[i] > 0 and mh[i] > mh[-2]: bull += 2
-    elif mh[i] < 0 and mh[i] < mh[-2]: bear += 2
-    if adx_value >= 18:
+    if hist[i] > 0 and hist[i] > hist[-2]: bull += 2
+    elif hist[i] < 0 and hist[i] < hist[-2]: bear += 2
+    if adx >= 18:
         if pdi > mdi: bull += 2
         elif mdi > pdi: bear += 2
-
-    resistance = max(h[-21:-1])
-    support = min(l[-21:-1])
-    if price > resistance: bull += 3
-    if price < support: bear += 3
-
-    typical = [(h[j] + l[j] + c[j]) / 3 for j in range(len(c) - 30, len(c))]
-    volumes = v[-30:]
-    tv = sum(volumes)
-    vwap = sum(x * y for x, y in zip(typical, volumes)) / tv if tv else price
-    if price > vwap: bull += 1
-    elif price < vwap: bear += 1
+    res = max(h[-21:-1])
+    sup = min(l[-21:-1])
+    if price > res: bull += 3
+    if price < sup: bear += 3
 
     total = bull + bear
-    normalized = (bull / total * 100) if total > 0 else 50
+    score = (bull / total * 100) if total > 0 else 50
 
-    if adx_value < 20: trend_text = "رِنج (بدون روند)"
-    elif adx_value < 25: trend_text = "در حال شکل‌گیری"
-    elif adx_value < 40: trend_text = "روند قوی"
-    else: trend_text = "روند بسیار قوی"
+    # تأیید حجم
+    avg_vol = sum(v[-11:-1]) / 10 if len(v) >= 11 else 0
+    vol_ok = v[-1] > avg_vol * 1.05 if avg_vol else False
 
-    if rr[i] < 30: rsi_text = "اشباع فروش"
-    elif rr[i] > 70: rsi_text = "اشباع خرید"
-    else: rsi_text = "خنثی"
+    # متن‌ها
+    if adx < 20: trend = "بدون روند (رِنج)"
+    elif adx < 25: trend = "در حال شکل‌گیری"
+    elif adx < 40: trend = "روند قوی"
+    else: trend = "روند خیلی قوی"
 
-    if mh[i] > 0 and mh[i] > mh[-2]: macd_text = "صعودی (خریداران)"
-    elif mh[i] < 0 and mh[i] < mh[-2]: macd_text = "نزولی (فروشندگان)"
-    else: macd_text = "کم‌جان"
+    if rr[i] < 30: rsi_txt = "اشباع فروش"
+    elif rr[i] > 70: rsi_txt = "اشباع خرید"
+    else: rsi_txt = "خنثی"
 
-    if normalized >= 65: status = "🟢 صعودی"
-    elif normalized <= 35: status = "🔴 نزولی"
+    if hist[i] > 0 and hist[i] > hist[-2]: macd_txt = "صعودی"
+    elif hist[i] < 0 and hist[i] < hist[-2]: macd_txt = "نزولی"
+    else: macd_txt = "کم‌جان"
+
+    if score >= 65: status = "🟢 صعودی"
+    elif score <= 35: status = "🔴 نزولی"
     else: status = "🟡 خنثی"
 
-    if normalized >= 65 and adx_value >= 20 and rr[i] < 70:
-        action, action_desc = "🟢 خرید بزن", "شرایط صعودی تایید شد."
-    elif normalized <= 35 and adx_value >= 20 and rr[i] > 30:
-        action, action_desc = "🔴 فروش بزن", "شرایط نزولی تایید شد."
+    # توصیه نهایی
+    buy = score >= 65 and adx >= 20 and rr[i] < 70 and vol_ok and hist[i] > 0
+    sell = score <= 35 and adx >= 20 and rr[i] > 30 and vol_ok and hist[i] < 0
+
+    if buy:
+        action = "🟢 خرید بزن"
+        reason = "روند، مومنتوم و حجم همه تأیید کردن."
+    elif sell:
+        action = "🔴 فروش بزن"
+        reason = "روند، مومنتوم و حجم همه تأیید کردن."
     else:
-        action, action_desc = "🟡 معامله نکن", "شرایط برای ورود امن نیست، صبر کنید."
+        action = "🟡 دست نگه دار"
+        if score >= 65 or score <= 35:
+            missing = []
+            if not vol_ok: missing.append("حجم کم")
+            if adx < 20: missing.append("روند ضعیف")
+            reason = "چون " + " و ".join(missing) + " است، ریسک بالاست." if missing else "شرایط کامل نیست."
+        else:
+            reason = "بازار جهت مشخصی نداره، صبر کن."
 
     return {
-        "price": price, "trend_text": trend_text, "rsi_text": rsi_text,
-        "macd_text": macd_text, "status": status, "support": support,
-        "resistance": resistance, "action": action, "action_desc": action_desc,
-        "rsi_value": rr[i], "adx_value": adx_value,
-        "pdi": pdi, "mdi": mdi, "vwap": vwap, "normalized": normalized,
+        "price": price, "score": score, "status": status,
+        "trend": trend, "rsi_txt": rsi_txt, "macd_txt": macd_txt,
+        "rsi": rr[i], "adx": adx, "sup": sup, "res": res,
+        "action": action, "reason": reason, "vol_ok": vol_ok,
     }
 
 
-# ─── تلگرام ───
-def send_telegram(message, chat_id=None, reply_markup=None):
+# ═══════════════ تلگرام ═══════════════
+def send(msg, chat_id=None, keyboard=None):
     if not TOKEN:
         return
     target = chat_id or CHAT
     if not target:
         return
     url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
-    payload = {"chat_id": target, "text": message}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
+    payload = {"chat_id": target, "text": msg}
+    if keyboard:
+        payload["reply_markup"] = json.dumps(keyboard)
     data = urllib.parse.urlencode(payload).encode()
     req = urllib.request.Request(url, data=data)
     try:
@@ -252,182 +250,190 @@ def get_updates(offset=None):
         return json.loads(r.read().decode())
 
 
-# ─── کیبوردها ───
-def coins_keyboard():
+# ═══════════════ کیبوردها ═══════════════
+def coins_kb():
     rows = []
     items = list(COINS.keys())
     for i in range(0, len(items), 2):
         rows.append([{"text": x} for x in items[i:i + 2]])
-    return {"keyboard": rows, "resize_keyboard": True, "one_time_keyboard": False}
+    return {"keyboard": rows, "resize_keyboard": True}
 
 
-def timeframes_keyboard():
+def tf_kb():
     return {
         "keyboard": [
             [{"text": t} for t in TIMEFRAMES[:3]],
             [{"text": t} for t in TIMEFRAMES[3:]],
-            [{"text": "🔙 بازگشت به ارزها"}],
+            [{"text": "📊 همه تایم‌فریم‌ها"}],
+            [{"text": "🔙 بازگشت"}],
         ],
         "resize_keyboard": True,
-        "one_time_keyboard": False,
     }
 
 
-# ─── تحلیل ───
-def build_analysis_message(coin_name, symbol, timeframe, r, auto=False):
+# ═══════════════ ساخت پیام ═══════════════
+def analysis_text(coin, sym, tf, r, higher=None, higher_tf=None, auto=False):
     head = "🔔 تحلیل خودکار" if auto else "📊 تحلیل"
-    msg = f"{head} {coin_name} ({timeframe})\n"
-    msg += f"نماد: `{symbol}`\n"
-    msg += "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-    msg += f"💰 قیمت: ${r['price']:,.4f}\n"
-    msg += f"📌 وضعیت: {r['status']}  (امتیاز: {r['normalized']:.0f}/100)\n\n"
-    msg += f"🔹 روند بازار: {r['trend_text']}  (ADX={r['adx_value']:.1f})\n"
-    msg += f"🔹 روانشناسی: {r['rsi_text']}  (RSI={r['rsi_value']:.1f})\n"
-    msg += f"🔹 مومنتوم: {r['macd_text']}\n"
-    msg += f"🔹 VWAP: ${r['vwap']:,.4f}\n"
-    msg += f"🔹 DMI: +DI={r['pdi']:.1f} / -DI={r['mdi']:.1f}\n\n"
-    msg += f"🟢 حمایت: ${r['support']:,.4f}\n"
-    msg += f"🔴 مقاومت: ${r['resistance']:,.4f}\n"
-    msg += "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-    msg += f"🎯 توصیه نهایی: {r['action']}\n"
-    msg += f"_{r['action_desc']}_"
-    return msg
+    t = f"{head} {coin} ({tf})\n"
+    t += "─────────────\n"
+    t += f"💰 قیمت: ${r['price']:,.4f}\n"
+    t += f"📌 وضعیت: {r['status']} ({r['score']:.0f}/100)\n\n"
+    t += f"📈 روند: {r['trend']}\n"
+    t += f"🧠 روانشناسی: {r['rsi_txt']} (RSI {r['rsi']:.1f})\n"
+    t += f"⚡ مومنتوم: {r['macd_txt']}\n"
+    t += f"📊 حجم: {'تأیید ✅' if r['vol_ok'] else 'ضعیف ❌'}\n\n"
+    t += f"🟢 حمایت: ${r['sup']:,.4f}\n"
+    t += f"🔴 مقاومت: ${r['res']:,.4f}\n"
+
+    if higher:
+        t += "─────────────\n"
+        t += f"🔭 تایم بالاتر ({higher_tf}): {higher['action']}\n"
+
+    t += "─────────────\n"
+    t += f"🎯 توصیه: {r['action']}\n"
+    t += f"💡 {r['reason']}"
+    return t
 
 
-def send_analysis(chat_id, coin_name, symbol, timeframe, auto=False):
+def do_analysis(chat_id, coin, sym, tf, auto=False):
     try:
-        data = candles(symbol, timeframe)
+        data = candles(sym, tf)
         r = analyze(data)
-        msg = build_analysis_message(coin_name, symbol, timeframe, r, auto=auto)
-        send_telegram(msg, chat_id=chat_id, reply_markup=timeframes_keyboard())
+        higher = higher_tf = None
+        htf = HIGHER_TF.get(tf)
+        if htf and htf != tf:
+            try:
+                higher = analyze(candles(sym, htf))
+                higher_tf = htf
+            except Exception:
+                pass
+        send(analysis_text(coin, sym, tf, r, higher, higher_tf, auto), chat_id, tf_kb())
     except Exception as e:
-        send_telegram(f"❌ خطا در تحلیل {coin_name} ({timeframe}):\n{e}",
-                      chat_id=chat_id, reply_markup=timeframes_keyboard())
-        print("Analysis Error:", e)
+        send(f"❌ خطا: {e}", chat_id, tf_kb())
 
 
-# ─── تایمر خودکار ───
+def do_all_tf(chat_id, coin, sym):
+    try:
+        send(f"⏳ دارم {coin} رو در همه تایم‌فریم‌ها بررسی می‌کنم...", chat_id)
+        lines = [f"📊 بررسی کامل {coin}\n─────────────"]
+        buys = sells = 0
+        for tf in TIMEFRAMES:
+            try:
+                r = analyze(candles(sym, tf))
+                icon = "🟢" if "خرید" in r["action"] else "🔴" if "فروش" in r["action"] else "🟡"
+                if "خرید" in r["action"]: buys += 1
+                if "فروش" in r["action"]: sells += 1
+                lines.append(f"{icon} {tf}: {r['action']} | {r['score']:.0f}/100")
+            except Exception as e:
+                lines.append(f"⚠️ {tf}: خطا")
+            time.sleep(0.3)
+        lines.append("─────────────")
+        if buys >= 3:
+            lines.append("✅ نتیجه: همه تایم‌فریم‌ها صعودی — فرصت خرید")
+        elif sells >= 3:
+            lines.append("✅ نتیجه: همه تایم‌فریم‌ها نزولی — فرصت فروش")
+        else:
+            lines.append("⚠️ نتیجه: تایم‌فریم‌ها با هم هماهنگ نیستن، احتیاط کن")
+        send("\n".join(lines), chat_id, tf_kb())
+    except Exception as e:
+        send(f"❌ خطا: {e}", chat_id)
+
+
+# ═══════════════ تایمر خودکار ═══════════════
 def auto_timer():
-    print(f"Auto-timer started (every {AUTO_INTERVAL // 60} mins).")
+    print("Auto-timer started (15 min)")
     while True:
-        time.sleep(AUTO_INTERVAL)
+        time.sleep(900)
         with lock:
             subs = list(subscriptions.items())
-        if not subs:
-            continue
-        print(f"Auto analysis for {len(subs)} user(s)...")
         for chat_id, sub in subs:
             try:
-                send_analysis(chat_id, sub["coin"], COINS[sub["coin"]], sub["tf"], auto=True)
-                time.sleep(1)  # جلوگیری از rate limit تلگرام
+                do_analysis(chat_id, sub["coin"], COINS[sub["coin"]], sub["tf"], auto=True)
+                time.sleep(1)
             except Exception as e:
-                print("Auto error for", chat_id, e)
+                print("Auto error:", e)
 
 
-# ─── حلقه اصلی ───
-def handle_messages():
+# ═══════════════ حلقه اصلی ═══════════════
+def main():
     print("Bot is running...")
-    last_update_id = None
-
-    t = threading.Thread(target=auto_timer, daemon=True)
-    t.start()
+    last_id = None
+    threading.Thread(target=auto_timer, daemon=True).start()
 
     while True:
         try:
-            updates = get_updates(last_update_id)
+            updates = get_updates(last_id)
             if updates.get("ok"):
-                for update in updates["result"]:
-                    last_update_id = update["update_id"] + 1
-                    if "message" not in update or "text" not in update["message"]:
+                for u in updates["result"]:
+                    last_id = u["update_id"] + 1
+                    if "message" not in u or "text" not in u["message"]:
                         continue
-                    text = update["message"]["text"].strip()
-                    chat_id = str(update["message"]["chat"]["id"])
-
+                    text = u["message"]["text"].strip()
+                    chat_id = str(u["message"]["chat"]["id"])
                     if CHAT and chat_id != CHAT:
                         continue
 
-                    if text in ["/start", "استارت", "شروع"]:
-                        send_telegram(
-                            "🤖 ربات تحلیل چند‌ارزی (با ارسال خودکار)\n\n"
-                            "۱️⃣ اول ارز را انتخاب کن\n"
-                            "۲️⃣ بعد تایم‌فریم را انتخاب کن\n"
-                            "⏰ از آن به بعد، هر ۱۵ دقیقه تحلیل خودکار می‌گیری.",
-                            chat_id=chat_id, reply_markup=coins_keyboard(),
+                    if text in ["/start", "شروع", "استارت"]:
+                        send(
+                            "سلام 👋\n\n"
+                            "این ربات بهت می‌گه کِی بخری و کِی بفروشی.\n\n"
+                            "1️⃣ اول یه ارز انتخاب کن\n"
+                            "2️⃣ بعد تایم‌فریم رو انتخاب کن\n\n"
+                            "بعد از اون، هر ۱۵ دقیقه خودش تحلیل می‌فرسته 📩",
+                            chat_id, coins_kb(),
                         )
 
                     elif text in COINS:
-                        # فقط ذخیره ارز، تایم‌فریم هنوز قبلی
                         with lock:
                             prev = subscriptions.get(chat_id, {})
-                            subscriptions[chat_id] = {
-                                "coin": text,
-                                "tf": prev.get("tf", DEFAULT_TIMEFRAME),
-                            }
-                        send_telegram(
-                            f"✅ ارز انتخاب شد: {text}\n"
-                            f"نماد: `{COINS[text]}`\n\n"
-                            "حالا تایم‌فریم را انتخاب کن:",
-                            chat_id=chat_id, reply_markup=timeframes_keyboard(),
-                        )
+                            subscriptions[chat_id] = {"coin": text, "tf": prev.get("tf", "15m")}
+                        send(f"✅ {text} انتخاب شد\n\nحالا تایم‌فریم رو بزن:", chat_id, tf_kb())
 
-                    elif text in ["🔙 بازگشت به ارزها", "بازگشت", "/back"]:
-                        send_telegram("🔙 لیست ارزها:",
-                                      chat_id=chat_id, reply_markup=coins_keyboard())
+                    elif text in ["🔙 بازگشت", "بازگشت"]:
+                        send("لیست ارزها:", chat_id, coins_kb())
+
+                    elif text == "📊 همه تایم‌فریم‌ها":
+                        with lock:
+                            sub = subscriptions.get(chat_id)
+                        if not sub:
+                            send("اول یه ارز انتخاب کن:", chat_id, coins_kb())
+                            continue
+                        threading.Thread(
+                            target=do_all_tf,
+                            args=(chat_id, sub["coin"], COINS[sub["coin"]]),
+                            daemon=True,
+                        ).start()
 
                     elif text in TIMEFRAMES:
                         with lock:
                             sub = subscriptions.get(chat_id)
-                            if not sub:
-                                sub = None
                             if sub:
                                 sub["tf"] = text
-
                         if not sub:
-                            send_telegram("❗ اول یک ارز انتخاب کن:",
-                                          chat_id=chat_id, reply_markup=coins_keyboard())
+                            send("اول یه ارز انتخاب کن:", chat_id, coins_kb())
                             continue
-
-                        coin_name = sub["coin"]
-                        send_telegram(f"⏳ در حال تحلیل {coin_name} ({text})...", chat_id=chat_id)
-                        send_analysis(chat_id, coin_name, COINS[coin_name], text)
-                        send_telegram(
-                            f"⏰ تنظیم شد: از این به بعد هر ۱۵ دقیقه تحلیل خودکار "
-                            f"{coin_name} ({text}) را می‌فرستم.",
-                            chat_id=chat_id, reply_markup=timeframes_keyboard(),
+                        send(f"⏳ دارم {sub['coin']} ({text}) رو تحلیل می‌کنم...", chat_id)
+                        do_analysis(chat_id, sub["coin"], COINS[sub["coin"]], text)
+                        send(
+                            f"⏰ باشه! از الان هر ۱۵ دقیقه تحلیل {sub['coin']} ({text}) رو برات می‌فرستم.",
+                            chat_id, tf_kb(),
                         )
 
                     elif text in ["/stop", "توقف", "قطع"]:
                         with lock:
                             had = subscriptions.pop(chat_id, None)
-                        if had:
-                            send_telegram("🛑 ارسال خودکار متوقف شد.", chat_id=chat_id)
-                        else:
-                            send_telegram("الان عضوی نداری که متوقف بشه.", chat_id=chat_id)
-
-                    elif text in ["/analyze", "تحلیل", "تحلیل کن"]:
-                        with lock:
-                            sub = subscriptions.get(chat_id)
-                        if sub:
-                            send_telegram(f"⏳ در حال تحلیل {sub['coin']} ({sub['tf']})...",
-                                          chat_id=chat_id)
-                            send_analysis(chat_id, sub["coin"], COINS[sub["coin"]], sub["tf"])
-                        else:
-                            send_telegram("اول یک ارز انتخاب کن:",
-                                          chat_id=chat_id, reply_markup=coins_keyboard())
+                        send("🛑 ارسال خودکار قطع شد." if had else "چیزی برای قطع کردن نبود.", chat_id)
 
                     else:
-                        send_telegram(
-                            "لطفاً از دکمه‌ها استفاده کن.\nبرای شروع مجدد: /start",
-                            chat_id=chat_id, reply_markup=coins_keyboard(),
-                        )
+                        send("از دکمه‌های زیر استفاده کن 👇", chat_id, coins_kb())
             time.sleep(1)
         except Exception as e:
-            print("Polling error:", e)
+            print("Error:", e)
             time.sleep(5)
 
 
 if __name__ == "__main__":
     if not TOKEN:
-        print("BOT_TOKEN is missing!")
+        print("❌ BOT_TOKEN تنظیم نشده!")
         sys.exit(1)
-    handle_messages()
+    main()
