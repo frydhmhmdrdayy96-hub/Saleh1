@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ربات تحلیل ارز - نسخه ساده و دقیق برای پدر
+# ربات تحلیل ارز - نسخه نهایی با حد ضرر و حد سود
 import os
 import sys
 import json
@@ -43,7 +43,7 @@ def api(path, params=None):
 def candles(symbol, interval, limit=300):
     rows = api("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
     now = int(time.time() * 1000)
-    rows = [x for x in rows if int(x[6]) < now]  # فقط کندل بسته‌شده
+    rows = [x for x in rows if int(x[6]) < now]
     if len(rows) < 220:
         raise RuntimeError("داده کافی نیست")
     return {
@@ -137,6 +137,20 @@ def dmi(data, p=14):
     return pdi, mdi, adx
 
 
+def atr(data, p=14):
+    h, l, c = data["high"], data["low"], data["close"]
+    n = len(c)
+    tr = [0.0] * n
+    for i in range(1, n):
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
+    if n <= p:
+        return 0.0
+    a = sum(tr[1:p + 1]) / p
+    for i in range(p + 1, n):
+        a = (a * (p - 1) + tr[i]) / p
+    return a
+
+
 # ═══════════════ تحلیل اصلی ═══════════════
 def analyze(data):
     c, h, l, v = data["close"], data["high"], data["low"], data["volume"]
@@ -144,10 +158,11 @@ def analyze(data):
     rr = rsi(c)
     hist = macd(c)
     pdi, mdi, adx = dmi(data)
+    atr_val = atr(data)
     i = -1
     price = c[-1]
 
-    # امتیازدهی
+    # ── امتیازدهی ──
     bull = bear = 0
     if price > e20[i]: bull += 2
     else: bear += 2
@@ -170,11 +185,129 @@ def analyze(data):
     total = bull + bear
     score = (bull / total * 100) if total > 0 else 50
 
-    # تأیید حجم
+    # ── تأیید حجم ──
     avg_vol = sum(v[-11:-1]) / 10 if len(v) >= 11 else 0
     vol_ok = v[-1] > avg_vol * 1.05 if avg_vol else False
 
-    # متن‌ها
+    # ── فیلتر «دیر شده» ──
+    dist_pct = abs(price - e20[i]) / e20[i] * 100 if e20[i] else 0
+    too_far_from_ema = dist_pct > 2.0
+
+    consecutive_green = 0
+    for j in range(-1, -8, -1):
+        if j - 1 >= -len(c) and c[j] > c[j - 1]:
+            consecutive_green += 1
+        else:
+            break
+
+    consecutive_red = 0
+    for j in range(-1, -8, -1):
+        if j - 1 >= -len(c) and c[j] < c[j - 1]:
+            consecutive_red += 1
+        else:
+            break
+
+    overbought = rr[i] > 70
+    oversold = rr[i] < 30
+    exhausted_up = consecutive_green >= 6
+    exhausted_down = consecutive_red >= 6
+
+    # ── سیگنال‌ها ──
+    confirmed_buy = (
+        score >= 65
+        and adx >= 20
+        and vol_ok
+        and hist[i] > 0
+        and not overbought
+        and not too_far_from_ema
+        and not exhausted_up
+        and consecutive_green <= 3
+    )
+    confirmed_sell = (
+        score <= 35
+        and adx >= 20
+        and vol_ok
+        and hist[i] < 0
+        and not oversold
+        and not too_far_from_ema
+        and not exhausted_down
+        and consecutive_red <= 3
+    )
+    early_buy = (
+        price > e20[i]
+        and hist[i] > hist[-2]
+        and 40 < rr[i] < 65
+        and not too_far_from_ema
+        and not exhausted_up
+        and consecutive_green <= 2
+    )
+    early_sell = (
+        price < e20[i]
+        and hist[i] < hist[-2]
+        and 35 < rr[i] < 60
+        and not too_far_from_ema
+        and not exhausted_down
+        and consecutive_red <= 2
+    )
+
+    # ── حد ضرر و حد سود ──
+    # بر اساس ATR: حد ضرر 1.5 برابر ATR، حد سود 3 برابر ATR (نسبت 1:2)
+    sl_distance = atr_val * 1.5
+    tp_distance = atr_val * 3.0
+
+    if confirmed_buy or early_buy:
+        stop_loss = price - sl_distance
+        take_profit = price + tp_distance
+        risk_pct = (sl_distance / price) * 100
+        reward_pct = (tp_distance / price) * 100
+    elif confirmed_sell or early_sell:
+        stop_loss = price + sl_distance
+        take_profit = price - tp_distance
+        risk_pct = (sl_distance / price) * 100
+        reward_pct = (tp_distance / price) * 100
+    else:
+        stop_loss = take_profit = None
+        risk_pct = reward_pct = 0
+
+    # ── توصیه نهایی ──
+    if confirmed_buy:
+        action = "🟢 خرید بزن (تأیید شده)"
+        reason = "روند + مومنتوم + حجم تأیید شد. قیمت نزدیک میانگینه (دیر نشده)."
+        signal_type = "confirmed"
+    elif confirmed_sell:
+        action = "🔴 فروش بزن (تأیید شده)"
+        reason = "روند نزولیه، مومنتوم و حجم تأیید کردن."
+        signal_type = "confirmed"
+    elif early_buy:
+        action = "🟡 هشدار خرید (زودهنگام)"
+        reason = "نشانه‌های اولیه صعود. اگه محتاطی، صبر کن تا تأیید بشه."
+        signal_type = "early"
+    elif early_sell:
+        action = "🟡 هشدار فروش (زودهنگام)"
+        reason = "نشانه‌های اولیه نزول."
+        signal_type = "early"
+    elif too_far_from_ema and consecutive_green >= 5:
+        action = "⛔ دیر شده! نخر"
+        reason = f"قیمت {dist_pct:.1f}% از میانگین فاصله گرفته و {consecutive_green} کندل رفته بالا. احتمال ریزش هست، صبر کن برای پولبک."
+        signal_type = "late"
+    elif too_far_from_ema and consecutive_red >= 5:
+        action = "⛔ دیر شده! نفروش"
+        reason = f"قیمت {dist_pct:.1f}% افتاده. احتمال برگشت هست، صبر کن."
+        signal_type = "late"
+    elif overbought:
+        action = "⛔ اشباع خرید — نخر"
+        reason = f"RSI به {rr[i]:.1f} رسیده. همه خریدن، احتمال ریزش هست."
+        signal_type = "late"
+    elif oversold:
+        action = "⛔ اشباع فروش — نفروش"
+        reason = f"RSI به {rr[i]:.1f} رسیده. همه فروختن، احتمال برگشت هست."
+        signal_type = "late"
+    else:
+        action = "⚪ دست نگه دار"
+        reason = "هیچ نشانه‌ای نیست."
+        signal_type = "none"
+
+    # ── متن‌ها ──
     if adx < 20: trend = "بدون روند (رِنج)"
     elif adx < 25: trend = "در حال شکل‌گیری"
     elif adx < 40: trend = "روند قوی"
@@ -192,31 +325,19 @@ def analyze(data):
     elif score <= 35: status = "🔴 نزولی"
     else: status = "🟡 خنثی"
 
-    # توصیه نهایی
-    buy = score >= 65 and adx >= 20 and rr[i] < 70 and vol_ok and hist[i] > 0
-    sell = score <= 35 and adx >= 20 and rr[i] > 30 and vol_ok and hist[i] < 0
-
-    if buy:
-        action = "🟢 خرید بزن"
-        reason = "روند، مومنتوم و حجم همه تأیید کردن."
-    elif sell:
-        action = "🔴 فروش بزن"
-        reason = "روند، مومنتوم و حجم همه تأیید کردن."
-    else:
-        action = "🟡 دست نگه دار"
-        if score >= 65 or score <= 35:
-            missing = []
-            if not vol_ok: missing.append("حجم کم")
-            if adx < 20: missing.append("روند ضعیف")
-            reason = "چون " + " و ".join(missing) + " است، ریسک بالاست." if missing else "شرایط کامل نیست."
-        else:
-            reason = "بازار جهت مشخصی نداره، صبر کن."
-
     return {
         "price": price, "score": score, "status": status,
         "trend": trend, "rsi_txt": rsi_txt, "macd_txt": macd_txt,
         "rsi": rr[i], "adx": adx, "sup": sup, "res": res,
         "action": action, "reason": reason, "vol_ok": vol_ok,
+        "signal_type": signal_type,
+        "dist_pct": dist_pct,
+        "consecutive": consecutive_green if consecutive_green > 0 else consecutive_red,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "risk_pct": risk_pct,
+        "reward_pct": reward_pct,
+        "atr": atr_val,
     }
 
 
@@ -291,7 +412,19 @@ def analysis_text(coin, sym, tf, r, higher=None, higher_tf=None, auto=False):
 
     t += "─────────────\n"
     t += f"🎯 توصیه: {r['action']}\n"
-    t += f"💡 {r['reason']}"
+    t += f"💡 {r['reason']}\n"
+
+    # حد ضرر و حد سود
+    if r["stop_loss"] is not None:
+        t += "\n───── مدیریت ریسک ─────\n"
+        if "خرید" in r["action"]:
+            t += f"🛑 حد ضرر: ${r['stop_loss']:,.4f}  (-{r['risk_pct']:.1f}%)\n"
+            t += f"🎯 حد سود: ${r['take_profit']:,.4f}  (+{r['reward_pct']:.1f}%)\n"
+        else:
+            t += f"🛑 حد ضرر: ${r['stop_loss']:,.4f}  (+{r['risk_pct']:.1f}%)\n"
+            t += f"🎯 حد سود: ${r['take_profit']:,.4f}  (-{r['reward_pct']:.1f}%)\n"
+        t += f"⚖️ نسبت سود به ضرر: 1:{r['reward_pct']/r['risk_pct']:.1f}\n" if r['risk_pct'] > 0 else ""
+
     return t
 
 
@@ -324,7 +457,7 @@ def do_all_tf(chat_id, coin, sym):
                 if "خرید" in r["action"]: buys += 1
                 if "فروش" in r["action"]: sells += 1
                 lines.append(f"{icon} {tf}: {r['action']} | {r['score']:.0f}/100")
-            except Exception as e:
+            except Exception:
                 lines.append(f"⚠️ {tf}: خطا")
             time.sleep(0.3)
         lines.append("─────────────")
@@ -333,13 +466,13 @@ def do_all_tf(chat_id, coin, sym):
         elif sells >= 3:
             lines.append("✅ نتیجه: همه تایم‌فریم‌ها نزولی — فرصت فروش")
         else:
-            lines.append("⚠️ نتیجه: تایم‌فریم‌ها با هم هماهنگ نیستن، احتیاط کن")
+            lines.append("⚠️ نتیجه: تایم‌فریم‌ها هماهنگ نیستن، احتیاط کن")
         send("\n".join(lines), chat_id, tf_kb())
     except Exception as e:
         send(f"❌ خطا: {e}", chat_id)
 
 
-# ═══════════════ تایمر خودکار ═══════════════
+# ═══════════════ تایمرها ═══════════════
 def auto_timer():
     print("Auto-timer started (15 min)")
     while True:
@@ -354,11 +487,44 @@ def auto_timer():
                 print("Auto error:", e)
 
 
+def fast_watcher():
+    """هر ۳ دقیقه چک سریع برای هشدار زودهنگام"""
+    print("Fast watcher started (3 min)")
+    last_alerts = {}
+    while True:
+        time.sleep(180)
+        with lock:
+            subs = list(subscriptions.items())
+        for chat_id, sub in subs:
+            try:
+                data = candles(COINS[sub["coin"]], sub["tf"])
+                r = analyze(data)
+                key = f"{chat_id}_{sub['coin']}_{sub['tf']}"
+                # فقط برای سیگنال‌های زودهنگام یا تأییدشده
+                if r["signal_type"] in ("early", "confirmed"):
+                    if last_alerts.get(key) != r["action"]:
+                        last_alerts[key] = r["action"]
+                        msg = f"⚡ هشدار سریع!\n\n"
+                        msg += f"{sub['coin']} ({sub['tf']})\n"
+                        msg += f"💰 ${r['price']:,.4f}\n"
+                        msg += f"{r['action']}\n"
+                        msg += f"💡 {r['reason']}"
+                        if r["stop_loss"] is not None:
+                            msg += f"\n\n🛑 حد ضرر: ${r['stop_loss']:,.4f}"
+                            msg += f"\n🎯 حد سود: ${r['take_profit']:,.4f}"
+                        send(msg, chat_id)
+                else:
+                    last_alerts.pop(key, None)
+            except Exception as e:
+                print("Fast watcher error:", e)
+
+
 # ═══════════════ حلقه اصلی ═══════════════
 def main():
     print("Bot is running...")
     last_id = None
     threading.Thread(target=auto_timer, daemon=True).start()
+    threading.Thread(target=fast_watcher, daemon=True).start()
 
     while True:
         try:
@@ -379,7 +545,9 @@ def main():
                             "این ربات بهت می‌گه کِی بخری و کِی بفروشی.\n\n"
                             "1️⃣ اول یه ارز انتخاب کن\n"
                             "2️⃣ بعد تایم‌فریم رو انتخاب کن\n\n"
-                            "بعد از اون، هر ۱۵ دقیقه خودش تحلیل می‌فرسته 📩",
+                            "بعد از اون، هر ۱۵ دقیقه خودش تحلیل می‌فرسته 📩\n"
+                            "و هر ۳ دقیقه هم هشدار سریع می‌ده ⚡\n\n"
+                            "⚠️ همیشه حد ضرر رو رعایت کن!",
                             chat_id, coins_kb(),
                         )
 
