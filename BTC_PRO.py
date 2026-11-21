@@ -8,9 +8,10 @@ import threading
 import urllib.request
 import urllib.parse
 
+# ─── خواندن توکن از متغیرهای محیطی (GitHub Secrets / .env) ───
 BASE = "https://data-api.binance.vision"
-TOKEN = os.getenv("BOT_TOKEN", "")
-CHAT = os.getenv("ALLOWED_CHAT_ID", "") or os.getenv("CHAT_ID", "")
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHAT = (os.getenv("ALLOWED_CHAT_ID", "") or os.getenv("CHAT_ID", "")).strip()
 TIMEOUT = 20
 
 COINS = {
@@ -251,7 +252,6 @@ def analyze(data):
     )
 
     # ── حد ضرر و حد سود ──
-    # بر اساس ATR: حد ضرر 1.5 برابر ATR، حد سود 3 برابر ATR (نسبت 1:2)
     sl_distance = atr_val * 1.5
     tp_distance = atr_val * 3.0
 
@@ -414,7 +414,6 @@ def analysis_text(coin, sym, tf, r, higher=None, higher_tf=None, auto=False):
     t += f"🎯 توصیه: {r['action']}\n"
     t += f"💡 {r['reason']}\n"
 
-    # حد ضرر و حد سود
     if r["stop_loss"] is not None:
         t += "\n───── مدیریت ریسک ─────\n"
         if "خرید" in r["action"]:
@@ -423,7 +422,8 @@ def analysis_text(coin, sym, tf, r, higher=None, higher_tf=None, auto=False):
         else:
             t += f"🛑 حد ضرر: ${r['stop_loss']:,.4f}  (+{r['risk_pct']:.1f}%)\n"
             t += f"🎯 حد سود: ${r['take_profit']:,.4f}  (-{r['reward_pct']:.1f}%)\n"
-        t += f"⚖️ نسبت سود به ضرر: 1:{r['reward_pct']/r['risk_pct']:.1f}\n" if r['risk_pct'] > 0 else ""
+        if r['risk_pct'] > 0:
+            t += f"⚖️ نسبت سود به ضرر: 1:{r['reward_pct']/r['risk_pct']:.1f}\n"
 
     return t
 
@@ -500,7 +500,6 @@ def fast_watcher():
                 data = candles(COINS[sub["coin"]], sub["tf"])
                 r = analyze(data)
                 key = f"{chat_id}_{sub['coin']}_{sub['tf']}"
-                # فقط برای سیگنال‌های زودهنگام یا تأییدشده
                 if r["signal_type"] in ("early", "confirmed"):
                     if last_alerts.get(key) != r["action"]:
                         last_alerts[key] = r["action"]
